@@ -1,7 +1,7 @@
 use super::config::ConnectionSecurity;
 use super::message::{
-    mailbox_list, parse_full_message, parse_message_summary, truncate_chars,
-    validate_outgoing_body, ReadFormat,
+    destination_arg, mailbox_list, parse_full_message, parse_message_summary, seen_flag_query,
+    truncate_chars, uid_set_arg, validate_outgoing_body, ReadFormat,
 };
 use super::transport::AcceptBridgeCertificate;
 use super::*;
@@ -28,12 +28,77 @@ impl ConfigFile for StoredConfig {
 }
 
 #[test]
-fn mail_read_only_access_excludes_sending() {
+fn mail_read_only_access_excludes_changing_and_sending() {
     let tools = connector(None, None).tools();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 7);
     for tool in tools {
-        assert_eq!(tool.read_only, Some(tool.name != "send_email"));
+        let changes = matches!(
+            tool.name.as_str(),
+            "mark_read" | "move_messages" | "send_email"
+        );
+        assert_eq!(tool.read_only, Some(!changes), "{}", tool.name);
     }
+}
+
+#[test]
+fn moving_and_sending_ask_while_marking_as_read_runs_on_its_own() {
+    let policy = |name: &str| {
+        connector(None, None)
+            .tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| tool.policy)
+    };
+    assert_eq!(policy("mark_read"), Some(ToolPolicy::AutoApprove));
+    assert_eq!(policy("move_messages"), Some(ToolPolicy::Ask));
+    assert_eq!(policy("send_email"), Some(ToolPolicy::Ask));
+}
+
+#[test]
+fn uid_sets_are_bounded_deduplicated_and_positive() {
+    assert_eq!(
+        uid_set_arg(&json!({"uids": [7, 3, 7, 12]})).unwrap(),
+        "3,7,12"
+    );
+    assert!(uid_set_arg(&json!({})).is_err());
+    assert!(uid_set_arg(&json!({"uids": []})).is_err());
+    assert!(uid_set_arg(&json!({"uids": [0]})).is_err());
+    assert!(uid_set_arg(&json!({"uids": [-1]})).is_err());
+    assert!(uid_set_arg(&json!({"uids": ["5"]})).is_err());
+    assert!(uid_set_arg(&json!({"uids": [u64::from(u32::MAX) + 1]})).is_err());
+    let too_many: Vec<usize> = (1..=MAX_MESSAGES + 1).collect();
+    assert!(uid_set_arg(&json!({ "uids": too_many })).is_err());
+    let at_limit: Vec<usize> = (1..=MAX_MESSAGES).collect();
+    assert!(uid_set_arg(&json!({ "uids": at_limit })).is_ok());
+}
+
+#[test]
+fn marking_as_read_adds_the_seen_flag_unless_told_otherwise() {
+    assert_eq!(
+        seen_flag_query(&json!({})).unwrap(),
+        "+FLAGS.SILENT (\\Seen)"
+    );
+    assert_eq!(
+        seen_flag_query(&json!({"read": true})).unwrap(),
+        "+FLAGS.SILENT (\\Seen)"
+    );
+    assert_eq!(
+        seen_flag_query(&json!({"read": false})).unwrap(),
+        "-FLAGS.SILENT (\\Seen)"
+    );
+    assert!(seen_flag_query(&json!({"read": "no"})).is_err());
+}
+
+#[test]
+fn a_move_needs_a_different_single_line_destination() {
+    assert_eq!(
+        destination_arg(&json!({"destination": "Folders/Invoices"}), "INBOX").unwrap(),
+        "Folders/Invoices"
+    );
+    assert!(destination_arg(&json!({}), "INBOX").is_err());
+    assert!(destination_arg(&json!({"destination": ""}), "INBOX").is_err());
+    assert!(destination_arg(&json!({"destination": "INBOX"}), "INBOX").is_err());
+    assert!(destination_arg(&json!({"destination": "Archive\r\nA1 LOGOUT"}), "INBOX").is_err());
 }
 
 fn bridge_config() -> ProtonMailConfig {

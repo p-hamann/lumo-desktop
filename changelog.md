@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Proton Mail: Mark messages as read or unread, move them to another folder, and list folders. Moving asks first by default.
+
 ## [0.5.9]
 
 ### Security

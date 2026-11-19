@@ -160,7 +160,12 @@ fn sends_data(
     let read_only = tool.and_then(|tool| tool.read_only) == Some(true);
     let open_world = tool.and_then(|tool| tool.open_world) != Some(false);
     match (connector_id, tool_name) {
-        ("proton_mail", "list_messages" | "search_messages" | "read_message") => false,
+        // Flags and folders change only the user's own mailbox, which no one else can read.
+        (
+            "proton_mail",
+            "list_mailboxes" | "list_messages" | "search_messages" | "read_message" | "mark_read"
+            | "move_messages",
+        ) => false,
         ("filesystem" | "echo", _) => false,
         ("luminance", _) => !read_only,
         (id, _) if id.starts_with("mcp-") => !vetted || !read_only || open_world,
@@ -763,6 +768,25 @@ mod tests {
             asks(&h.gate("browser", "fetch", exfil(), Scope::Session)),
             "calls naming no conversation fall back to everything the session has seen"
         );
+    }
+
+    #[test]
+    fn tidying_the_mailbox_is_not_gated_after_reading_mail() {
+        let mut h = Harness::default();
+        h.read_mail(Scope::Session);
+        h.read_mail(Scope::Run("run-1"));
+        for tool in ["list_mailboxes", "mark_read", "move_messages"] {
+            assert_eq!(
+                h.gate("proton_mail", tool, json!({}), Scope::Session),
+                Gate::Allow,
+                "{tool}"
+            );
+            assert_eq!(
+                h.gate("proton_mail", tool, json!({}), Scope::Run("run-1")),
+                Gate::Allow,
+                "{tool}"
+            );
+        }
     }
 
     #[test]

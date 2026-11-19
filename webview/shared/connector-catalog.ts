@@ -86,7 +86,7 @@ export const BUILTIN_CONNECTORS: ConnectorCatalogEntry[] = [
     icon: '✉️',
     iconSrc: 'images/connectors/proton-mail.svg',
     name: 'Proton Mail',
-    description: 'Search, read, and send encrypted email through Proton Mail Bridge.',
+    description: 'Search, read, sort, and send encrypted email through Proton Mail Bridge.',
   },
   {
     id: 'luminance',

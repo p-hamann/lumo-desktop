@@ -7,7 +7,7 @@ use super::super::error::{AuthError, ToolError};
 use super::super::icons::bundled_icon_data_uri;
 use super::super::registry::{Connector, ConnectorDescriptor, Credentialed, ToolDefinition};
 use crate::account::AccountId;
-use async_imap::types::Fetch;
+use async_imap::types::{Fetch, Name, NameAttribute};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lettre::AsyncTransport;
@@ -27,10 +27,14 @@ mod transport;
 
 use config::{validate_config, SetupInput};
 use message::{
-    build_outgoing_message, build_search_query, full_message, limit_arg, message_summary,
-    read_format_arg, recent_days_arg, recent_since_query, string_arg,
+    build_outgoing_message, build_search_query, destination_arg, full_message, limit_arg,
+    message_summary, read_format_arg, recent_days_arg, recent_since_query, seen_flag_query,
+    string_arg, uid_set_arg,
 };
-use schema::{list_schema, read_schema, search_schema, send_schema, tool};
+use schema::{
+    list_mailboxes_schema, list_schema, mark_read_schema, move_schema, read_schema, search_schema,
+    send_schema, tool,
+};
 use transport::{connect_imap, describe_connection_error, security_name, smtp_transport};
 
 pub use config::{AccountConfigFile, ConfigFile, ProtonMailConfig};
@@ -298,6 +302,94 @@ impl ProtonMailConnector {
         result
     }
 
+    async fn selected_session(&self, mailbox: &str) -> Result<ImapSession, ToolError> {
+        let mut session = self.with_session().await?;
+        timeout(IO_TIMEOUT, session.select(mailbox))
+            .await
+            .map_err(|_| ToolError::ExecutionFailed("selecting mailbox timed out".into()))?
+            .map_err(|e| ToolError::ExecutionFailed(format!("could not select mailbox: {e}")))?;
+        Ok(session)
+    }
+
+    async fn list_mailboxes(&self) -> Result<Value, ToolError> {
+        let mut session = self.with_session().await?;
+        let listed = async {
+            let stream = timeout(IO_TIMEOUT, session.list(Some(""), Some("*")))
+                .await
+                .map_err(|_| ToolError::ExecutionFailed("listing mailboxes timed out".into()))?
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}"))
+                })?;
+            let names: Vec<Name> = timeout(IO_TIMEOUT, stream.try_collect())
+                .await
+                .map_err(|_| ToolError::ExecutionFailed("listing mailboxes timed out".into()))?
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}"))
+                })?;
+            let mut mailboxes = names
+                .iter()
+                .filter(|name| !name.attributes().contains(&NameAttribute::NoSelect))
+                .map(|name| name.name().to_string())
+                .collect::<Vec<_>>();
+            mailboxes.sort();
+            Ok(json!({ "mailboxes": mailboxes }))
+        }
+        .await;
+        let _ = timeout(IO_TIMEOUT, session.logout()).await;
+        listed
+    }
+
+    async fn mark_read(&self, input: Value) -> Result<Value, ToolError> {
+        let mailbox = string_arg(&input, "mailbox").unwrap_or("INBOX");
+        let uid_set = uid_set_arg(&input)?;
+        let query = seen_flag_query(&input)?;
+        let mut session = self.selected_session(mailbox).await?;
+        let stored = async {
+            let stream = timeout(IO_TIMEOUT, session.uid_store(&uid_set, query))
+                .await
+                .map_err(|_| ToolError::ExecutionFailed("updating messages timed out".into()))?
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("updating messages failed: {e}"))
+                })?;
+            let _: Vec<Fetch> = timeout(IO_TIMEOUT, stream.try_collect())
+                .await
+                .map_err(|_| ToolError::ExecutionFailed("updating messages timed out".into()))?
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("updating messages failed: {e}"))
+                })?;
+            Ok(())
+        }
+        .await;
+        let _ = timeout(IO_TIMEOUT, session.logout()).await;
+        stored?;
+        Ok(json!({
+            "mailbox": mailbox,
+            "uids": uid_set,
+            "read": query.starts_with('+'),
+        }))
+    }
+
+    async fn move_messages(&self, input: Value) -> Result<Value, ToolError> {
+        let mailbox = string_arg(&input, "mailbox").unwrap_or("INBOX");
+        let uid_set = uid_set_arg(&input)?;
+        let destination = destination_arg(&input, mailbox)?;
+        let mut session = self.selected_session(mailbox).await?;
+        let moved = timeout(IO_TIMEOUT, session.uid_mv(&uid_set, destination))
+            .await
+            .map_err(|_| ToolError::ExecutionFailed("moving messages timed out".into()))
+            .and_then(|result| {
+                result
+                    .map_err(|e| ToolError::ExecutionFailed(format!("moving messages failed: {e}")))
+            });
+        let _ = timeout(IO_TIMEOUT, session.logout()).await;
+        moved?;
+        Ok(json!({
+            "mailbox": mailbox,
+            "uids": uid_set,
+            "destination": destination,
+        }))
+    }
+
     async fn send_email(&self, input: Value) -> Result<Value, ToolError> {
         let config = self.current_config()?;
         let password = self.current_password().await?;
@@ -361,6 +453,12 @@ impl Connector for ProtonMailConnector {
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
             tool(
+                "list_mailboxes",
+                "List mailboxes",
+                "List the mailboxes (folders and labels) a message can be read from or moved to.",
+                list_mailboxes_schema(),
+            ),
+            tool(
                 "list_messages",
                 "List messages",
                 "List recently received messages in a mailbox, newest first. Defaults to the last 30 days.",
@@ -378,9 +476,23 @@ impl Connector for ProtonMailConnector {
                 "Read one message by mailbox and UID as plain text, HTML, or both.",
                 read_schema(),
             ),
+            tool(
+                "mark_read",
+                "Mark as read",
+                "Mark messages as read, or as unread again with read set to false.",
+                mark_read_schema(),
+            ),
             ToolDefinition {
                 policy: ToolPolicy::Ask,
-                read_only: Some(false),
+                ..tool(
+                    "move_messages",
+                    "Move messages",
+                    "Move messages to another mailbox. Moving to a Labels/ mailbox applies that label; moving to Trash deletes the messages.",
+                    move_schema(),
+                )
+            },
+            ToolDefinition {
+                policy: ToolPolicy::Ask,
                 ..tool(
                     "send_email",
                     "Send email",
@@ -393,9 +505,12 @@ impl Connector for ProtonMailConnector {
 
     async fn invoke(&self, tool_name: &str, input: Value) -> Result<Value, ToolError> {
         match tool_name {
+            "list_mailboxes" => self.list_mailboxes().await,
             "list_messages" => self.list_messages(input).await,
             "search_messages" => self.search_messages(input).await,
             "read_message" => self.read_message(input).await,
+            "mark_read" => self.mark_read(input).await,
+            "move_messages" => self.move_messages(input).await,
             "send_email" => self.send_email(input).await,
             _ => Err(ToolError::UnknownTool(tool_name.into())),
         }
