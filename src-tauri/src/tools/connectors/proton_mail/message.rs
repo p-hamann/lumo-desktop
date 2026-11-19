@@ -124,6 +124,65 @@ pub(super) fn recent_since_query(days: u64) -> String {
     format!("SINCE {}", since.format("%d-%b-%Y"))
 }
 
+/// The messages a mail-changing tool acts on: 1 to [`MAX_MESSAGES`] distinct UIDs, as an IMAP set.
+pub(super) fn uid_set_arg(input: &Value) -> Result<String, ToolError> {
+    let invalid = || {
+        ToolError::InvalidInput(format!(
+            "uids must list 1 to {MAX_MESSAGES} positive integers"
+        ))
+    };
+    let values = input
+        .get("uids")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(invalid)?;
+    let mut uids = values
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|uid| *uid > 0 && *uid <= u32::MAX as u64)
+                .ok_or_else(invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    uids.sort_unstable();
+    uids.dedup();
+    if uids.len() > MAX_MESSAGES {
+        return Err(invalid());
+    }
+    Ok(uids
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+/// The `\Seen` change for `mark_read`: adds the flag unless `read` is false.
+pub(super) fn seen_flag_query(input: &Value) -> Result<&'static str, ToolError> {
+    match input.get("read") {
+        None => Ok("+FLAGS.SILENT (\\Seen)"),
+        Some(Value::Bool(true)) => Ok("+FLAGS.SILENT (\\Seen)"),
+        Some(Value::Bool(false)) => Ok("-FLAGS.SILENT (\\Seen)"),
+        Some(_) => Err(ToolError::InvalidInput("read must be a boolean".into())),
+    }
+}
+
+/// The folder messages are moved to. It must differ from the one they are in.
+pub(super) fn destination_arg<'a>(input: &'a Value, mailbox: &str) -> Result<&'a str, ToolError> {
+    let destination = required_string(input, "destination")?;
+    if destination.contains(['\r', '\n', '\0']) {
+        return Err(ToolError::InvalidInput(
+            "destination cannot contain line breaks".into(),
+        ));
+    }
+    if destination == mailbox {
+        return Err(ToolError::InvalidInput(
+            "destination must differ from the mailbox the messages are in".into(),
+        ));
+    }
+    Ok(destination)
+}
+
 pub(super) fn mailbox_list(
     input: &Value,
     key: &str,
