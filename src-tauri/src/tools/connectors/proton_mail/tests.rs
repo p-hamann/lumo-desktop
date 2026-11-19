@@ -56,7 +56,10 @@ fn moving_and_sending_ask_while_marking_as_read_runs_on_its_own() {
 
 #[test]
 fn uid_sets_are_bounded_deduplicated_and_positive() {
-    assert_eq!(uid_set_arg(&json!({"uids": [7, 3, 7, 12]})).unwrap(), "3,7,12");
+    assert_eq!(
+        uid_set_arg(&json!({"uids": [7, 3, 7, 12]})).unwrap(),
+        "3,7,12"
+    );
     assert!(uid_set_arg(&json!({})).is_err());
     assert!(uid_set_arg(&json!({"uids": []})).is_err());
     assert!(uid_set_arg(&json!({"uids": [0]})).is_err());
@@ -71,7 +74,10 @@ fn uid_sets_are_bounded_deduplicated_and_positive() {
 
 #[test]
 fn marking_as_read_adds_the_seen_flag_unless_told_otherwise() {
-    assert_eq!(seen_flag_query(&json!({})).unwrap(), "+FLAGS.SILENT (\\Seen)");
+    assert_eq!(
+        seen_flag_query(&json!({})).unwrap(),
+        "+FLAGS.SILENT (\\Seen)"
+    );
     assert_eq!(
         seen_flag_query(&json!({"read": true})).unwrap(),
         "+FLAGS.SILENT (\\Seen)"

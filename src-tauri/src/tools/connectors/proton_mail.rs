@@ -317,11 +317,15 @@ impl ProtonMailConnector {
             let stream = timeout(IO_TIMEOUT, session.list(Some(""), Some("*")))
                 .await
                 .map_err(|_| ToolError::ExecutionFailed("listing mailboxes timed out".into()))?
-                .map_err(|e| ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}")))?;
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}"))
+                })?;
             let names: Vec<Name> = timeout(IO_TIMEOUT, stream.try_collect())
                 .await
                 .map_err(|_| ToolError::ExecutionFailed("listing mailboxes timed out".into()))?
-                .map_err(|e| ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}")))?;
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("listing mailboxes failed: {e}"))
+                })?;
             let mut mailboxes = names
                 .iter()
                 .filter(|name| !name.attributes().contains(&NameAttribute::NoSelect))
@@ -344,11 +348,15 @@ impl ProtonMailConnector {
             let stream = timeout(IO_TIMEOUT, session.uid_store(&uid_set, query))
                 .await
                 .map_err(|_| ToolError::ExecutionFailed("updating messages timed out".into()))?
-                .map_err(|e| ToolError::ExecutionFailed(format!("updating messages failed: {e}")))?;
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("updating messages failed: {e}"))
+                })?;
             let _: Vec<Fetch> = timeout(IO_TIMEOUT, stream.try_collect())
                 .await
                 .map_err(|_| ToolError::ExecutionFailed("updating messages timed out".into()))?
-                .map_err(|e| ToolError::ExecutionFailed(format!("updating messages failed: {e}")))?;
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("updating messages failed: {e}"))
+                })?;
             Ok(())
         }
         .await;
@@ -370,7 +378,8 @@ impl ProtonMailConnector {
             .await
             .map_err(|_| ToolError::ExecutionFailed("moving messages timed out".into()))
             .and_then(|result| {
-                result.map_err(|e| ToolError::ExecutionFailed(format!("moving messages failed: {e}")))
+                result
+                    .map_err(|e| ToolError::ExecutionFailed(format!("moving messages failed: {e}")))
             });
         let _ = timeout(IO_TIMEOUT, session.logout()).await;
         moved?;
